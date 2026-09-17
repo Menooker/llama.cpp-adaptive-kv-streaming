@@ -2,12 +2,23 @@ name: release_server
 
 on:
   workflow_dispatch:
+    inputs:
+      cuda_arch:
+        description: 'CUDA architectures: project defaults or SM120 only'
+        type: choice
+        default: all
+        options:
+          - all
+          - sm120
 
 permissions:
   contents: write
 
 env:
   CUDA_VERSION: '13.3'
+  CUDA_ARCH_FLAGS: ${{ inputs.cuda_arch == 'sm120' && '-DCMAKE_CUDA_ARCHITECTURES=120a-real' || '' }}
+  CUDA_ARCH_SUFFIX: ${{ inputs.cuda_arch == 'sm120' && '-sm120' || '' }}
+  CUDA_ARCH_LABEL: ${{ inputs.cuda_arch == 'sm120' && 'SM120 only' || 'default architectures' }}
   RELEASE_TAG: server-${{ github.run_number }}-${{ github.run_attempt }}
 
 jobs:
@@ -54,7 +65,7 @@ jobs:
             -DLLAMA_BUILD_APP=OFF ^
             -DLLAMA_BUILD_TOOLS=ON ^
             -DLLAMA_BUILD_SERVER=ON ^
-            -DLLAMA_BUILD_UI=ON
+            -DLLAMA_BUILD_UI=ON %CUDA_ARCH_FLAGS%
           if errorlevel 1 exit /b 1
           set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
           cmake --build build --config Release -j %NINJA_JOBS% --target llama-server
@@ -71,7 +82,7 @@ jobs:
             throw 'CUDA backend was not built'
           }
 
-          $archive = "llama-$env:RELEASE_TAG-bin-win-cuda-$env:CUDA_VERSION-x64.zip"
+          $archive = "llama-$env:RELEASE_TAG-bin-win-cuda-$env:CUDA_VERSION-x64$env:CUDA_ARCH_SUFFIX.zip"
           7z a -tzip $archive ./package/*
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "archive=$archive" >> $env:GITHUB_OUTPUT
@@ -100,7 +111,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: llama-${{ env.RELEASE_TAG }}-win-cuda-${{ env.CUDA_VERSION }}-x64
+          name: llama-${{ env.RELEASE_TAG }}-win-cuda-${{ env.CUDA_VERSION }}-x64${{ env.CUDA_ARCH_SUFFIX }}
           path: |
             ${{ steps.package.outputs.archive }}
             ${{ steps.runtime.outputs.archive }}
@@ -119,7 +130,7 @@ jobs:
               ...context.repo,
               tag_name: process.env.RELEASE_TAG,
               target_commitish: context.sha,
-              name: `llama-server ${process.env.RELEASE_TAG} (Windows x64, CUDA ${process.env.CUDA_VERSION})`,
+              name: `llama-server ${process.env.RELEASE_TAG} (Windows x64, CUDA ${process.env.CUDA_VERSION}, ${process.env.CUDA_ARCH_LABEL})`,
               body: 'Extract the server and CUDA runtime ZIP files into the same directory, then run llama-server.exe.',
               draft: true,
               prerelease: false,
