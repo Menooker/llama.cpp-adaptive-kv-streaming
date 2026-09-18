@@ -25,6 +25,7 @@ class Server:
     def __init__(
         self, model: Path, executable: Path, port: int,
         arena_mib: int, cache_mib: int, log: Path,
+        n_draft: int = 0, reject_draft: bool = False,
     ):
         command = [
             str(executable),
@@ -35,7 +36,12 @@ class Server:
             "--reasoning-format", "none",
             "--kv-stream-arena-mib", str(arena_mib),
             "--cache-ram", str(cache_mib),
+            "--spec-type", "draft-mtp" if n_draft else "none",
         ]
+        if n_draft:
+            command += ["--spec-draft-n-max", str(n_draft), "--spec-draft-p-min", "0", "--spec-draft-n-min", "0"]
+        if reject_draft:
+            command += ["--spec-synth-rates", ",".join("0" for _ in range(n_draft))]
         self.log_file = log.open("wb")
         self.process = subprocess.Popen(
             command, stdout=self.log_file, stderr=subprocess.STDOUT)
@@ -131,6 +137,32 @@ def run_prompt_cache(
         server.stop()
 
 
+def run_mtp(
+    model: Path, executable: Path, port: int, arena_mib: int, output: Path,
+):
+    short = patterned(513, (23066, 1000, 2000))
+    prompts = [short, patterned(6145, (23066, 6000, 7000, 8000, 9000)), short]
+    expected = None
+    for name, n_draft, reject_draft in [("baseline", 0, False), ("verify", 2, False), ("reject", 2, True)]:
+        server = Server(model, executable, port, arena_mib, 0, output / f"mtp-{name}.log", n_draft, reject_draft)
+        try:
+            results = [completion(server, prompt, False) for prompt in prompts]
+            (output / f"mtp-{name}.json").write_text(json.dumps(results, indent=2))
+            actual = [result["content"] for result in results]
+            if expected is None:
+                expected = actual
+            elif actual != expected:
+                raise RuntimeError(f"MTP {name} output differs from baseline: {json.dumps(actual)}")
+            if n_draft:
+                drafted = sum(result["timings"].get("draft_n", 0) for result in results)
+                accepted = sum(result["timings"].get("draft_n_accepted", 0) for result in results)
+                if drafted == 0 or (reject_draft and accepted != 0):
+                    raise RuntimeError(f"MTP {name} did not exercise the expected path: {accepted}/{drafted}")
+                print(f"MTP {name} test: PASS ({accepted}/{drafted} accepted)", flush=True)
+        finally:
+            server.stop()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=Path, required=True)
@@ -138,6 +170,7 @@ def main():
         "--server", type=Path,
         default=ROOT / "build-kv-cuda/bin/llama-server")
     parser.add_argument("--arena-mib", type=int, default=128)
+    parser.add_argument("--test-mtp", action="store_true", help="also compare MTP verification and rejection against ordinary decoding")
     parser.add_argument("--port", type=int, default=12358)
     parser.add_argument("--output", type=Path, default=ROOT / "benchmarks/results/serial-server")
     args = parser.parse_args()
@@ -145,6 +178,8 @@ def main():
     run_serial(args.model, args.server, args.port, args.arena_mib, args.output)
     run_prompt_cache(
         args.model, args.server, args.port, args.arena_mib, args.output)
+    if args.test_mtp:
+        run_mtp(args.model, args.server, args.port, args.arena_mib, args.output)
 
 
 if __name__ == "__main__":

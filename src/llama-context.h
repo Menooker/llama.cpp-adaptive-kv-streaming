@@ -284,6 +284,7 @@ private:
 
     struct kv_stream_phase_arena_owner {
         struct layout {
+            uint32_t n_tokens = 0;
             size_t kv_bytes = 0;
             size_t compute_offset = 0;
             size_t compute_bytes = 0;

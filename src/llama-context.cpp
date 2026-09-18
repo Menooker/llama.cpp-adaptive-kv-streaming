@@ -840,10 +840,8 @@ bool llama_context::kv_stream_switch_phase(
     }
 
     const uint32_t n_seqs = cparams.n_seq_max;
-    const uint32_t n_tokens = decode ?
-        n_seqs : std::min(cparams.n_ctx, cparams.n_ubatch);
-    const uint32_t n_outputs = decode ?
-        n_seqs : std::min(n_tokens, cparams.n_outputs_max);
+    const uint32_t n_tokens = target.n_tokens;
+    const uint32_t n_outputs = std::min(n_tokens, cparams.n_outputs_max);
     auto * gf = graph_reserve(
         n_tokens, n_seqs, n_outputs, reserve_mctx.get());
     if (gf == nullptr) {
@@ -941,8 +939,10 @@ void llama_context::sched_reserve() {
         const int n_splits_pp = ggml_backend_sched_get_n_splits(sched.get());
         const int n_nodes_pp = ggml_graph_n_nodes(gf_pp);
 
+        // Speculative verification needs an output for each drafted token and the anchor.
+        const uint32_t n_tokens_tg = std::min(n_tokens, cparams.n_outputs_max);
         auto * gf_tg = graph_reserve(
-            n_seqs, n_seqs, n_seqs, mctx.get(), true, sizes_tg.data());
+            n_tokens_tg, n_seqs, n_tokens_tg, mctx.get(), true, sizes_tg.data());
         if (gf_tg == nullptr) {
             throw std::runtime_error("failed to measure compute tg buffers");
         }
@@ -980,9 +980,10 @@ void llama_context::sched_reserve() {
                 plan_tg.error);
         }
 
-        auto make_layout = [](const llama_kv_stream_phase_plan & plan,
+        auto make_layout = [](uint32_t n_tokens, const llama_kv_stream_phase_plan & plan,
                               std::vector<size_t> sizes) {
             kv_stream_phase_arena_owner::layout result;
+            result.n_tokens = n_tokens;
             result.kv_bytes = plan.kv_bytes;
             result.compute_offset = plan.compute_offset;
             result.compute_bytes = plan.compute_bytes;
@@ -994,9 +995,9 @@ void llama_context::sched_reserve() {
         };
 
         kv_stream_phase_arena.prefill =
-            make_layout(plan_pp, std::move(sizes_pp));
+            make_layout(n_tokens, plan_pp, std::move(sizes_pp));
         kv_stream_phase_arena.token_generation =
-            make_layout(plan_tg, std::move(sizes_tg));
+            make_layout(n_tokens_tg, plan_tg, std::move(sizes_tg));
         kv_stream_phase_arena.backend_index = backend_index;
         kv_stream_phase_arena.max_nodes = max_nodes;
         kv_stream_phase_arena.configured = true;
@@ -1027,8 +1028,8 @@ void llama_context::sched_reserve() {
             LLAMA_LOG_INFO("%s: graph nodes  = %d\n", __func__, n_nodes_pp);
         } else {
             LLAMA_LOG_INFO(
-                "%s: graph nodes  = %d (with bs=%d), %d (with bs=1)\n",
-                __func__, n_nodes_pp, n_tokens, n_nodes_tg);
+                "%s: graph nodes  = %d (with bs=%d), %d (with bs=%d)\n",
+                __func__, n_nodes_pp, n_tokens, n_nodes_tg, n_tokens_tg);
         }
         if (n_splits_pp == n_splits_tg) {
             LLAMA_LOG_INFO("%s: graph splits = %d\n", __func__, n_splits_pp);
@@ -1793,10 +1794,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                     llama_kv_stream_phase_is_generation(
                         phase, ubatch.n_tokens);
                 if (kv_stream_phase_arena.configured && generation &&
-                        ubatch.n_tokens != cparams.n_seq_max) {
+                        ubatch.n_tokens > kv_stream_phase_arena.token_generation.n_tokens) {
                     LLAMA_LOG_ERROR(
-                        "%s: phase arena currently supports TG1 without speculative batches\n",
-                        __func__);
+                        "%s: phase arena decode batch too wide: %u tokens > %u reserved\n",
+                        __func__, ubatch.n_tokens, kv_stream_phase_arena.token_generation.n_tokens);
                     ret = GGML_STATUS_FAILED;
                     return nullptr;
                 }
